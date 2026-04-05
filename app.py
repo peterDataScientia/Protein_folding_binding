@@ -1,95 +1,206 @@
-# This is app is created with instructions provided by Chanin Nantasenamat (Data Professor) https://youtube.com/dataprofessor
-# Credit: This app is inspired by https://huggingface.co/spaces/osanseviero/esmfold
-
 import streamlit as st
 from stmol import showmol
 import py3Dmol
 import requests
 import biotite.structure.io as bsio
+import biotite.structure as bs
 import altair as alt
 from PIL import Image
+import re
+import uuid
+import pandas as pd
+import numpy as np
+from scipy.spatial import distance_matrix
 
-# st.set_page_config(layout = 'wide')
-######################
-# Page title
-st.markdown("""
-# Protein structure prediction using ESMFold
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(layout="wide")
+st.title("🧬 AI Protein Structure Prediction & Analysis Platform")
 
-This interactive App enable you to predict protein structure from the amino acid sequence, based on the ESM2 large language model.
+# -----------------------------
+# LOAD IMAGE
+# -----------------------------
+try:
+    image = Image.open('logo.jpg')
+    st.image(image, use_column_width=True)
+except:
+    st.warning("Logo not found.")
 
-""")
+# -----------------------------
+# SIDEBAR
+# -----------------------------
+st.sidebar.title("ESMFold Platform")
 
-image = Image.open('logo.jpg')
-st.image(image, use_column_width=True)
-st.sidebar.title('ESMFold')
-st.sidebar.write('[*ESMFold*](https://esmatlas.com/about) is an end-to-end single sequence protein structure predictor based on the ESM-2 language model. For more information, read the [research article](https://www.biorxiv.org/content/10.1101/2022.07.20.500902v2) and the [news article](https://www.nature.com/articles/d41586-022-03539-1) published in *Nature*.')
+sequence = st.sidebar.text_area(
+    "Input sequence (≤ 400 amino acids)",
+    "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL",
+    height=250
+)
 
-# stmol
-def render_mol(pdb):
+predict = st.sidebar.button("Predict & Analyze")
 
+# -----------------------------
+# VALIDATION
+# -----------------------------
+def is_valid_sequence(seq):
+    return bool(re.fullmatch(r"[ACDEFGHIKLMNPQRSTVWY]+", seq))
+
+# -----------------------------
+# FETCH STRUCTURE
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def fetch_structure(sequence):
+    try:
+        response = requests.post(
+            "https://api.esmatlas.com/foldSequence/v1/pdb/",
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            data=sequence,
+            timeout=60
+        )
+        response.raise_for_status()
+        return response.content.decode('utf-8')
+    except:
+        return None
+
+# -----------------------------
+# BINDING SITE PREDICTION
+# -----------------------------
+def predict_binding_sites(struct):
+    try:
+        coords = struct.coord
+        dist_matrix = distance_matrix(coords, coords)
+        density = (dist_matrix < 6.0).sum(axis=1)
+        top_indices = np.argsort(density)[-20:]
+        return top_indices
+    except:
+        return None
+
+# -----------------------------
+# RAMACHANDRAN PLOT
+# -----------------------------
+def ramachandran_plot(struct):
+    try:
+        phi, psi, _ = bs.dihedral_backbone(struct)
+
+        mask = ~np.isnan(phi) & ~np.isnan(psi)
+        phi = np.degrees(phi[mask])
+        psi = np.degrees(psi[mask])
+
+        df = pd.DataFrame({"phi": phi, "psi": psi})
+
+        chart = alt.Chart(df).mark_circle(size=40).encode(
+            x=alt.X("phi", scale=alt.Scale(domain=[-180, 180])),
+            y=alt.Y("psi", scale=alt.Scale(domain=[-180, 180]))
+        ).properties(title="Ramachandran Plot")
+
+        st.altair_chart(chart, use_container_width=True)
+
+    except:
+        st.warning("Ramachandran plot failed.")
+
+# -----------------------------
+# 3D VISUALIZATION
+# -----------------------------
+def render_mol(pdb_string, binding_sites=None):
     pdbview = py3Dmol.view()
-    pdbview.addModel(pdb,'pdb')
-    style = st.selectbox('style', ['cartoon','line','cross','stick','sphere'], on_change=update)
-    spinon = st.button('Spin ON', on_click=update)
-    spinoff = st.button('Spin OFF', on_click=update)
-    pdbview.setStyle({style:{'color':'spectrum'}})
-    pdbview.setBackgroundColor('white')#('0xeeeeee')
+    pdbview.addModel(pdb_string, 'pdb')
+
+    pdbview.setStyle({
+        "cartoon": {
+            "colorscheme": {
+                "prop": "b",
+                "gradient": "roygb",
+                "min": 0,
+                "max": 100
+            }
+        }
+    })
+
+    if binding_sites is not None:
+        for resi in binding_sites:
+            pdbview.addStyle(
+                {"resi": int(resi)},
+                {"stick": {"color": "red"}}
+            )
+
+    pdbview.setBackgroundColor('white')
     pdbview.zoomTo()
-    pdbview.zoom(2, 800)
-    pdbview.spin(True == spinon, False == spinoff)
-    showmol(pdbview, height = 500,width=800)
+    showmol(pdbview, height=500, width=800)
 
-# Protein sequence input
-DEFAULT_SEQ = "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL"
-txt = st.sidebar.text_area('Input sequence [upto 400 amino acids]', DEFAULT_SEQ, height=275)
+# -----------------------------
+# MAIN EXECUTION
+# -----------------------------
+if predict:
 
-# ESMfold
-def update(sequence=txt):
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-    }
-    response = requests.post('https://api.esmatlas.com/foldSequence/v1/pdb/', headers=headers, data=sequence, verify=False)
-    if response.status_code != 200:
-        st.warning("Unable to predict protein structure. Please try again later.")
-        return
+    sequence = sequence.strip().upper()
 
-    name = sequence[:3] + sequence[-3:]
-    pdb_string = response.content.decode('utf-8')
+    if len(sequence) > 400:
+        st.error("Sequence too long! Max = 400 amino acids")
+        st.stop()
 
-    with open('predicted.pdb', 'w') as f:
+    if not is_valid_sequence(sequence):
+        st.error("Invalid sequence!")
+        st.stop()
+
+    with st.spinner("Predicting structure..."):
+        pdb_string = fetch_structure(sequence)
+
+    if pdb_string is None:
+        st.error("Prediction failed. Try again.")
+        st.stop()
+
+    # Save structure
+    filename = f"pred_{uuid.uuid4().hex}.pdb"
+    with open(filename, "w") as f:
         f.write(pdb_string)
 
-    struct = bsio.load_structure('predicted.pdb', extra_fields=["b_factor"])
-    b_value = round(struct.b_factor.mean(), 4)
+    struct = bsio.load_structure(filename, extra_fields=["b_factor"])
+    plddt = struct.b_factor * 100
+    avg_plddt = round(plddt.mean(), 2)
 
-    # Display protein structure
-    st.subheader('Visualization of predicted protein structure')
-    render_mol(pdb_string)
+    # Binding sites
+    binding_sites = predict_binding_sites(struct)
 
-    # plDDT value is stored in the B-factor field
-    st.subheader('pLDDT value')
-    st.write('pLDDT is a per-residue estimate of the confidence in prediction on a scale from 0-100. (higher the number, higher the confidance of structure predicted)')
-    st.info(f'pLDDT: {b_value * 100}')
+    # -----------------------------
+    # DISPLAY
+    # -----------------------------
+    st.subheader("🧪 3D Structure (Confidence Heatmap + Binding Sites)")
+    render_mol(pdb_string, binding_sites)
 
+    # pLDDT
+    st.subheader("📊 Confidence Score")
+    st.info(f"Average pLDDT: {avg_plddt}")
+
+    # Histogram
+    df = pd.DataFrame(plddt, columns=["pLDDT"])
+    chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X("pLDDT", bin=True),
+        y="count()"
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    # Ramachandran
+    st.subheader("📐 Ramachandran Plot")
+    ramachandran_plot(struct)
+
+    # Binding residues
+    if binding_sites is not None:
+        st.subheader("🎯 Predicted Binding Residues")
+        st.write(binding_sites.tolist())
+
+    # Download
     st.download_button(
-        label="Download PDB",
-        data=pdb_string,
-        file_name='predicted.pdb',
-        mime='text/plain',
+        "Download PDB",
+        pdb_string,
+        file_name=filename
     )
 
-predict = st.sidebar.button('Predict', on_click=update)
+else:
+    st.info("👈 Enter sequence and click Predict & Analyze")
 
-
-if not predict:
-    st.warning('👈 Enter protein sequence data in side panel!')
-
-st.markdown("""
-***Found the App useful or Have a suggestion?*** Kinldy provide your valuable FEEDBACK [HERE](https://forms.gle/nuSvvnqZ3Aofmb3p7)
-
-*Credits:
-This app is inspired by the work done by [Chanin Nantasenamat](https://github.com/dataprofessor) & [osanseviero](https://huggingface.co/spaces/osanseviero/esmfold)*
-
-**Protein structure prediction using ESMFold App** © 2024 by [VISHAL BHOIR](https://linktr.ee/thebioway) is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-
-""")
+# -----------------------------
+# FOOTER
+# -----------------------------
+st.markdown("---")
+st.markdown("🚀 Integrated AI platform: Prediction + Validation + Interpretation")
